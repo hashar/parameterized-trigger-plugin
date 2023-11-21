@@ -52,9 +52,11 @@ import hudson.model.queue.QueueTaskFuture;
 
 
 import java.util.ArrayList;
+import java.util.concurrent.Future;
 import java.util.Collections;
 import java.util.List;
 import java.util.ListIterator;
+import java.util.logging.Level;
 import java.util.regex.Pattern;
 import java.util.regex.Matcher;
 import java.io.IOException;
@@ -64,20 +66,26 @@ import java.lang.System;
 import jenkins.model.Jenkins;
 import org.jvnet.hudson.test.Issue;
 import org.jvnet.hudson.test.JenkinsRule;
+import org.jvnet.hudson.test.LoggerRule;
 import org.jvnet.hudson.test.SleepBuilder;
 import org.mockito.Mockito;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
+
 
 public class TriggerBuilderTest {
 
     @Rule
     public JenkinsRule r = new JenkinsRule();
+
+    @Rule
+    public LoggerRule logger = new LoggerRule();
 
     private BlockableBuildTriggerConfig createTriggerConfig(String projects) {
         return new BlockableBuildTriggerConfig(projects, new BlockingBehaviour("never", "never", "never"), null);
@@ -222,6 +230,45 @@ public class TriggerBuilderTest {
 
         assertLines(triggerProject.getLastBuild(),
                 "Triggering projects: project1, project2, project3");
+    }
+
+    @Test
+    public void testCancelsDownstreamBuildWhenInterrupted() throws Exception{
+        logger.capture(99).record( TriggerBuilder.class.getName(), Level.ALL);
+
+        FreeStyleProject triggerProject = r.createFreeStyleProject("upstream-project");
+        FreeStyleProject downstreamProject = r.createFreeStyleProject("downstream-project");
+
+        BlockableBuildTriggerConfig config = new BlockableBuildTriggerConfig("downstream-project", null, null);
+        TriggerBuilder triggerBuilder = new TriggerBuilder(config);
+
+        triggerProject.getBuildersList().add(triggerBuilder);
+
+        downstreamProject.setBlockBuildWhenUpstreamBuilding(true);
+        QueueTaskFuture<FreeStyleBuild> parentBuild = triggerProject.scheduleBuild2(0);
+        parentBuild.waitForStart();
+
+        // Wait for downstream build to start
+        while( downstreamProject.getLastBuild() == null ) {
+            System.out.println("waiting...");
+            Thread.sleep(100);
+        }
+
+        triggerProject.getLastBuild().getExecutor().interrupt();
+        parentBuild.get();
+        
+        assertLines(triggerProject.getLastBuild(),
+            "Triggering projects: downstream-project",
+            "Build was aborted",
+            "Finished: ABORTED"
+        );
+        assertLines(downstreamProject.getLastBuild(),
+            "foobar"
+        );
+
+        List<String> expected = new ArrayList<String>();
+        assertEquals(expected, logger.getMessages());
+
     }
 
     @Test
